@@ -23,9 +23,6 @@
 #define DIR_TYPE 'd'
 #define UNKNOWN_TYPE 'u'
 
-// Others
-#define DIR_ENTRY_NAME_MAX_LEN 256
-
 void help()
 {
     printf("ls [<path>]");
@@ -61,7 +58,7 @@ int processDir(const char* path, const struct stat *dirInfo)
             switch(entry->d_type)
             {
                 case DT_REG:
-                    char fname[DIR_ENTRY_NAME_MAX_LEN] = "";
+                    char fname[NAME_MAX] = "";
 
                     strcat(fname, path);
                     strcat(fname, "/");
@@ -125,10 +122,7 @@ int main(int argc, char** argv)
     {
         return processDir(path, &pathInfo);
     }
-    else 
-    {
-        printf("Invalid argument: %s (no such directory or file)", path);
-        return S_ERR;
-    }
+    fprintf(stderr, "Invalid argument: %s (no such directory or file)", path);
+    exit(S_ERR);
   
 }
