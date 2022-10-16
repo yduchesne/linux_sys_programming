@@ -10,9 +10,11 @@
 #include "stdlib.h"
 #include "stdio.h"
 #include "string.h"
+#include "errno.h"
 #include "stdint.h"
 #include "sys/stat.h"
 #include "dirent.h"
+
 
 // Return codes
 #define S_OK 0
@@ -22,6 +24,9 @@
 #define FILE_TYPE 'f'
 #define DIR_TYPE 'd'
 #define UNKNOWN_TYPE 'u'
+
+#define ERRNO_NOT_FOUND 2
+
 
 void help()
 {
@@ -80,7 +85,7 @@ int processDir(const char* path, const struct stat *dirInfo)
     }
     else 
     {
-        printf("No such directory: %s\n", path);
+        fprintf(stderr, "No such directory: %s\n", path);
         return S_ERR;
     }
     closedir(dir);
@@ -94,11 +99,12 @@ int main(int argc, char** argv)
 {
     // Validating input
     char* path = ".";
+    int result = S_ERR;
 
     if ( argc > 1 ) 
     {
         path = argv[1];        
-        // Lenient handling of help option
+        // Displaying help if requested
         if ( 
             ( strcmp(path, "-h") == 0 ) || 
             ( strcmp(path, "-help") == 0 ) ||         
@@ -109,20 +115,45 @@ int main(int argc, char** argv)
             return S_OK;
         }
     }
+
+    // Obtaining metadata for path (used to determine whether
+    // it is a file or a directory)
     struct stat pathInfo;
-    stat(path, &pathInfo);
+    if (stat(path, &pathInfo) == -1)
+    {
+        switch(errno)
+        {
+            case ERRNO_NOT_FOUND:
+                fprintf(stderr, "No such directory or file: %s", path);   
+                break;
+            default:
+                fprintf(stderr, "Error accessing directory or file: %s (errno: %u)", path, errno);            
+        }
+        result = S_ERR;
+        goto Finally;
+    }
 
     int isFile = S_ISREG(pathInfo.st_mode);
     int isDir  = S_ISDIR(pathInfo.st_mode);
     if (isFile)
     {
-        return processFile(path, &pathInfo);
+        result = processFile(path, &pathInfo);
+        goto Finally;
     } 
     else if (isDir)
     {
-        return processDir(path, &pathInfo);
+        result = processDir(path, &pathInfo);
+        goto Finally;
     }
-    fprintf(stderr, "Invalid argument: %s (no such directory or file)", path);
-    exit(S_ERR);
+    else
+    {
+        fprintf(stderr, "Invalid file type for: %s (expected path to directory of file)", path);
+        result = S_ERR;
+        goto Finally;
+    }
+
+    // Catch-all: terminates the process
+    Finally:
+        exit(result);
   
 }
