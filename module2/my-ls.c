@@ -1,5 +1,9 @@
 /**
  * A custom ls-like command leveraging C's standard library.
+ * 
+ * The command outputs data in greppable format. Example:
+ * 
+ * my-ls -a | sort | grep "type: file"
  *
  */
 
@@ -10,74 +14,232 @@
 #include "stdlib.h"
 #include "stdio.h"
 #include "string.h"
+#include "unistd.h"
 #include "errno.h"
 #include "stdint.h"
 #include "sys/stat.h"
 #include "dirent.h"
+#include "time.h"
 
+// ============================================================================
+// Macros, typedefs, helper functions
 
-// Return codes
-#define S_OK 0
-#define S_ERR 1
+// Exit codes
+#define EC_OK 0
+#define EC_ERR 1
+#define EC_INVALID_FILE_TYPE 2
 
-// File type chars
-#define FILE_TYPE 'f'
-#define DIR_TYPE 'd'
-#define UNKNOWN_TYPE 'u'
-
+// Used with lstat (which sets errno to 2 when a path isn't found 
+// on the file system)
 #define ERRNO_NOT_FOUND 2
 
+// Boolean values
+#define TRUE  1
+#define FALSE 0
+typedef uint8_t bool;
 
-void help()
+// Formatted time type
+#define TIME_STR_LEN 50
+typedef char TIME_STR[TIME_STR_LEN];
+
+// Formats time
+void formatTime(time_t timestamp, TIME_STR buffer)
 {
-    printf("ls [<path>]");
+    struct tm tm_info;
+    localtime_r(&timestamp, &tm_info);
+    strftime(buffer, TIME_STR_LEN, "%Y-%m-%dT%H.%M.%S", &tm_info);
 }
 
-int processFile(const char* path, const struct stat *fileInfo)
+// Identifies supported file types
+typedef enum _FileType
 {
-    printf("f\t%s (size: %zu bytes)\n", path, fileInfo->st_size);
-    return S_OK;
+    TYPE_FILE = 0,
+    TYPE_DIR  = 1,
+    TYPE_LINK = 2,
+    UNDEFINED_FILE_TYPE = 100
+} FileType;
+
+FileType getFileType(mode_t mode)
+{
+    FileType fileType = UNDEFINED_FILE_TYPE;
+
+    if ( S_ISREG(mode) )
+    {
+        fileType = TYPE_FILE; 
+    }
+    else if ( S_ISDIR(mode) )
+    {
+        fileType = TYPE_DIR;    
+    }
+    else if ( S_ISLNK(mode) ) 
+    {
+        fileType = TYPE_LINK;
+    }
+
+    return fileType;
+
 }
 
-int processDir(const char* path, const struct stat *dirInfo)
+// Holds user-defined settings
+// (populated from command-line options)
+typedef struct _Settings
 {
+    bool with_disk_info;
+    bool with_owner_info;
+    bool with_perm_info;
+    bool with_time_info;
+
+} Settings;
+
+// initializes settings with defaults
+void newSettings(Settings* settings)
+{
+    settings->with_disk_info = FALSE;
+    settings->with_owner_info = FALSE;
+    settings->with_perm_info = FALSE;
+    settings->with_time_info = FALSE;
+
+}
+
+void help(const char* programName)
+{
+    printf("%s [-adopt] [<path>]\n", programName);
+    printf("  -a: all info (equivalent to -dopt)\n");
+    printf("  -d: disk info\n");
+    printf("  -o: owner info\n");    
+    printf("  -p: permission info\n");
+    printf("  -t: time info\n");
+
+}
+
+// ============================================================================
+// Core functionality
+
+uint8_t processFile(
+    FileType fileType,
+    const Settings* settings, 
+    const char* path, 
+    const struct stat *fileInfo
+)
+{
+
+    char typeName[NAME_MAX];
+    switch(fileType)
+    {
+        case TYPE_FILE:
+            strcpy(typeName, "file");
+            break;
+        case TYPE_LINK:
+            strcpy(typeName, "link");
+            break;
+        case TYPE_DIR:
+            strcpy(typeName, "dir");
+            break;
+        default:
+            fprintf(stderr, "Invalid file type: %s", path);
+            return EC_INVALID_FILE_TYPE;
+    }    
+
+    printf(
+        "name: %s, type: %s", 
+        path, 
+        typeName
+    );    
+
+    if (settings->with_owner_info)
+    {
+        printf(
+            ", uid: %u, gid: %u", 
+            fileInfo->st_uid,
+            fileInfo->st_gid
+        );            
+    }
+
+    if (settings->with_disk_info)
+    {
+        printf(
+            ", inode: %lu, blocks: %zu, block_size: %zu, size: %zu", 
+            fileInfo->st_ino,
+            fileInfo->st_blocks, 
+            fileInfo->st_blksize,
+            fileInfo->st_size            
+        );
+    }   
+
+    if (settings->with_perm_info)
+    {
+        printf(", u: ");
+        printf( (fileInfo->st_mode & S_IRUSR) ? "r" : "-");
+        printf( (fileInfo->st_mode & S_IWUSR) ? "w" : "-");
+        printf( (fileInfo->st_mode & S_IXUSR) ? "x" : "-");
+
+        printf(", g: ");
+        printf( (fileInfo->st_mode & S_IRGRP) ? "r" : "-");
+        printf( (fileInfo->st_mode & S_IWGRP) ? "w" : "-");
+        printf( (fileInfo->st_mode & S_IXGRP) ? "x" : "-");
+
+        printf(", o: ");
+        printf( (fileInfo->st_mode & S_IROTH) ? "r" : "-");
+        printf( (fileInfo->st_mode & S_IWOTH) ? "w" : "-");
+        printf( (fileInfo->st_mode & S_IXOTH) ? "x" : "-");    
+    }
+
+    if (settings->with_time_info)
+    {
+        TIME_STR created;
+        TIME_STR modified;
+        TIME_STR accessed;
+
+        formatTime(fileInfo->st_ctim.tv_sec, created);
+        formatTime(fileInfo->st_mtim.tv_sec, modified);
+        formatTime(fileInfo->st_atim.tv_sec, accessed);
+
+        printf(
+            ", created: %s, modified: %s, accessed: %s", 
+            created, 
+            modified, 
+            accessed
+        );
+    }
+
+    printf("\n");
+    return EC_OK;
+}
+
+uint8_t processDir(const Settings* settings, const char* path, const struct stat *dirInfo)
+{
+    uint8_t exitCode = EC_OK;    
     DIR *dir;
     struct dirent *entry;
-
-    uint32_t numFiles = 0;
-    uint32_t numDirs = 0;
-
     if ( ( dir = opendir(path) ) != NULL)
     {
         while ( ( entry = readdir(dir) ) != NULL )
         {
-            // Ignore the current and parent dirs
-            if ( 
-                ( strcmp(entry->d_name, ".") == 0 ) || 
-                ( strcmp(entry->d_name, "..") == 0 ) 
-            )
-            {
-                continue;
-            }
+            char fname[NAME_MAX] = "";
+
+            strcat(fname, path);
+            strcat(fname, "/");
+            strcat(fname, entry->d_name);
+
+            struct stat fileInfo;
+            stat(fname, &fileInfo);
 
             switch(entry->d_type)
             {
                 case DT_REG:
-                    char fname[NAME_MAX] = "";
-
-                    strcat(fname, path);
-                    strcat(fname, "/");
-                    strcat(fname, entry->d_name);
-
-                    struct stat fileInfo;
-                    stat(fname, &fileInfo);
-                    processFile(fname, &fileInfo);
-                    numFiles++;
+                case DT_LNK:
+                    exitCode = processFile(getFileType(fileInfo.st_mode), settings, fname, &fileInfo);
                     break;
                 case DT_DIR:
-                    numDirs++;
-                    printf("d\t%s\n", entry->d_name);
+                    exitCode = processFile(TYPE_DIR, settings, entry->d_name, &fileInfo);
                     break;
+                default:
+                    // ignoring other types
+            }
+
+            if (exitCode != EC_OK)
+            {
+                goto Finally;                
             }
            
         }
@@ -86,40 +248,70 @@ int processDir(const char* path, const struct stat *dirInfo)
     else 
     {
         fprintf(stderr, "No such directory: %s\n", path);
-        return S_ERR;
+        exitCode = EC_ERR;
     }
-    closedir(dir);
-    printf("Total...........: %u\n", numFiles + numDirs);
-    printf("  Files.........: %u\n", numFiles);
-    printf("  Directories...: %u\n", numDirs);    
-    return S_OK;
+
+    Finally:
+        closedir(dir);
+        return exitCode;
 }
 
 int main(int argc, char** argv)
 {
-    // Validating input
-    char* path = ".";
-    int result = S_ERR;
 
-    if ( argc > 1 ) 
+    // exit code
+    uint8_t exitCode = EC_OK;
+
+    // path set to current dir by default
+    char path[NAME_MAX];
+    strcpy(path, ".");
+
+    // populated from command-line options
+    Settings settings;
+    newSettings(&settings);
+
+    // option processing
+    int opt;
+    while((opt = getopt(argc, argv, ":hadopt :")) != -1)
     {
-        path = argv[1];        
-        // Displaying help if requested
-        if ( 
-            ( strcmp(path, "-h") == 0 ) || 
-            ( strcmp(path, "-help") == 0 ) ||         
-            ( strcmp(path, "--help") == 0 )
-        )  
-        {
-            help();
-            return S_OK;
+        switch(opt)
+        {   
+            case 'h':
+                help(argv[0]);
+                exitCode = EC_OK;
+                goto Finally;
+            case 'a':
+                settings.with_disk_info = TRUE;
+                settings.with_owner_info = TRUE;
+                settings.with_perm_info = TRUE;
+                settings.with_time_info = TRUE;
+                break;
+            case 'd':
+                settings.with_disk_info = TRUE;
+                break;
+            case 'o':
+                settings.with_owner_info = TRUE;
+                break;                
+            case 'p':
+                settings.with_perm_info = TRUE;
+                break;                
+            case 't':
+                settings.with_time_info = TRUE;
+                break;
+            
         }
+    }
+
+    // if there's a remaining arg, use as path
+    if (optind < argc)
+    {
+        strncpy(path, argv[optind], NAME_MAX);
     }
 
     // Obtaining metadata for path (used to determine whether
     // it is a file or a directory)
     struct stat pathInfo;
-    if (stat(path, &pathInfo) == -1)
+    if (lstat(path, &pathInfo) == -1)
     {
         switch(errno)
         {
@@ -129,31 +321,31 @@ int main(int argc, char** argv)
             default:
                 fprintf(stderr, "Error accessing directory or file: %s (errno: %u)", path, errno);            
         }
-        result = S_ERR;
+        exitCode = EC_ERR;
         goto Finally;
     }
 
-    int isFile = S_ISREG(pathInfo.st_mode);
-    int isDir  = S_ISDIR(pathInfo.st_mode);
-    if (isFile)
+ 
+    FileType fileType = getFileType(pathInfo.st_mode);
+    
+    switch (fileType)
     {
-        result = processFile(path, &pathInfo);
-        goto Finally;
-    } 
-    else if (isDir)
-    {
-        result = processDir(path, &pathInfo);
-        goto Finally;
-    }
-    else
-    {
-        fprintf(stderr, "Invalid file type for: %s (expected path to directory of file)", path);
-        result = S_ERR;
-        goto Finally;
+        case TYPE_FILE:
+        case TYPE_LINK:
+            exitCode = processFile(fileType, &settings, path, &pathInfo);
+            break;
+
+        case TYPE_DIR:
+            exitCode = processDir(&settings, path, &pathInfo);
+            break;
+
+        default:
+            fprintf(stderr, "Invalid file type for: %s (expected path to directory of file)", path);
+            exitCode = EC_ERR;
     }
 
     // Catch-all: terminates the process
     Finally:
-        exit(result);
+        exit(exitCode);
   
 }
