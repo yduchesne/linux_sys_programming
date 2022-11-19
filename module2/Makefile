@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -g -Wall
-TARGET = my-fork
+TARGET = my-ls
 OUT_DIR=@mkdir -p out
 
 format:
