@@ -8,7 +8,7 @@
 #define SLEEP_INTERVAL 5
 
 /**
- * A simple program illustrating for/wait functionality for basic
+ * A simple program illustrating fork/wait functionality for basic
  * multi-processing and process coordination:
  * 
  * - Parent forks a child process and waits on child completion.
