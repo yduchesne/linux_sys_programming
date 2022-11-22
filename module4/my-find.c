@@ -2,36 +2,36 @@
  * A custom find-like command leveraging C's standard library.
  *
  * my-find -p -t 5 *.c /home/alice/dev/projects
- * 
+ *
  * Implementation Notes
  * ====================
- * 
+ *
  * This program leverages the pthread API to perform directory traversal using
  * multiple threads:
- * 
- * 1) The program allows specifying a number of threads (i.e.: dubbed thread 
+ *
+ * 1) The program allows specifying a number of threads (i.e.: dubbed thread
  *    capacity) to use (beyond the main thread) to perform the traversal. At
  *    the outset, the program has <capacity> available threads to work with,
  *    beyond the main thread.
- * 
- * 2) Execution starts with the main thread: it lists the files/directories 
- *    under the provided path. If the -r option (standing for "recursive") 
+ *
+ * 2) Execution starts with the main thread: it lists the files/directories
+ *    under the provided path. If the -r option (standing for "recursive")
  *    has been specified by the user, the main thread attempts dispatching
  *    the traversal of the next directory it encounters to a new thread. If
  *    all threads are busy, then the main thread traverses the next directory.
- * 
+ *
  * 3) The process described in #2 continues recursively, and is identical for
- *    the threads started by the main thread, and started by "descendant" 
+ *    the threads started by the main thread, and started by "descendant"
  *    threads of the main thread: when a directory is encountered, the current
- *    thread attempts dispatching its traversal in a new thread. If all are 
+ *    thread attempts dispatching its traversal in a new thread. If all are
  *    busy at that moment, then it proceeds to the traversal itself.
- * 
- * 4) The processing of files (matching their names against the provided 
+ *
+ * 4) The processing of files (matching their names against the provided
  *    pattern) is done in the current thread (i.e.: only upon encountering
  *    a directory is spawning a new thread attempted).
- * 
- * The above process requires the use of a recursive mutex to keep track of 
- * the running threads. 
+ *
+ * The above process requires the use of a recursive mutex to keep track of
+ * the running threads.
  *
  */
 #define _DEFAULT_SOURCE
@@ -135,16 +135,16 @@ void safefree(void *ptr) {
  * Keeps track of a thread.
  */
 typedef struct _ThreadRef {
-  /** 
-   * ID of the thread to which this field corresonds - should be deemded 
+  /**
+   * ID of the thread to which this field corresonds - should be deemded
    * invalid is the isAvailable flag is true.
    */
   pthread_t thread;
 
   /**
    * Indicates whether or not the slot corresponding to the thread is available
-   * or not. If it isn't available, it means that the thread corresponding to 
-   * this instance is currently active, and that the slot isn't available. 
+   * or not. If it isn't available, it means that the thread corresponding to
+   * this instance is currently active, and that the slot isn't available.
    * Otherwise, it means that the thread has been exited (and the thread ID
    * kept by the thread field is invalid).
    */
@@ -154,10 +154,12 @@ typedef struct _ThreadRef {
 /**
  * Program-wide structure (shared by all threads) holding the ThreadRef array
  * used to keep track of running threads and available thread slots (a slot
- * is simply a cell in the threadRefs array specified as a field of this struct).
- * 
- * Access to the threadRefs and availableThreadCount fields should be done in 
- * a thread-safe manner, using the mutex that an instance of this struct provides.
+ * is simply a cell in the threadRefs array specified as a field of this
+ * struct).
+ *
+ * Access to the threadRefs and availableThreadCount fields should be done in
+ * a thread-safe manner, using the mutex that an instance of this struct
+ * provides.
  */
 typedef struct _ThreadState {
   // Used to synchronize access to the members of this struct.
@@ -194,7 +196,7 @@ void newThreadState(ThreadState *ts, uint8_t threadCapacity) {
 
 /**
  * Releases the resources kept as part of the given ThreadState instance.
- */ 
+ */
 void destroyThreadState(ThreadState *ts) {
   assertIt(pthread_mutexattr_destroy(&ts->mutex_attr) == 0,
            "Could not destroy mutex attributes\n");
@@ -204,7 +206,7 @@ void destroyThreadState(ThreadState *ts) {
 // ----------------------------------------------------------------------------
 // User input
 
-/** 
+/**
  * Holds user-defined settings (populated from command-line options).
  */
 typedef struct _Settings {
@@ -213,7 +215,7 @@ typedef struct _Settings {
   LogLevel systemLogLevel;
 } Settings;
 
-/** 
+/**
  * Initializes settings with defaults.
  */
 void newSettings(Settings *settings) {
@@ -246,7 +248,6 @@ typedef struct _FileInfo {
 typedef void (*FileMatchCallback)(const Settings *settings,
                                   const FileInfo *fileInfo);
 
-
 /**
  * Implements the FileMatchCallback typedef.
  */
@@ -254,8 +255,7 @@ void outputMatch(const Settings *settings, const FileInfo *fileInfo) {
 
   int result = fnmatch(settings->pattern, fileInfo->name, FNM_PATHNAME);
   if (result == 0) {
-    logIt(settings->systemLogLevel, NORMAL, "%s\n",
-          fileInfo->path);
+    logIt(settings->systemLogLevel, NORMAL, "%s\n", fileInfo->path);
   } else {
     logIt(settings->systemLogLevel, TRACE,
           "No match for pattern %s against file path %s\n", settings->pattern,
@@ -266,8 +266,8 @@ void outputMatch(const Settings *settings, const FileInfo *fileInfo) {
 // ----------------------------------------------------------------------------
 // VisitContext
 
-/** 
- * Encapsulates all parameters necessary for a visitDir function call in the 
+/**
+ * Encapsulates all parameters necessary for a visitDir function call in the
  * context of a specific thread.
  */
 typedef struct _VisitContext {
@@ -290,7 +290,7 @@ typedef struct _VisitContext {
 void startVisitThread(VisitContext *context);
 
 /**
- * Visits the directory whose representation is encapsulated by the given 
+ * Visits the directory whose representation is encapsulated by the given
  * context. Calls startVisitThread whenever it encounters a sub-directory.
  */
 uint8_t visitDir(VisitContext *context) {
@@ -358,14 +358,14 @@ Finally:
 }
 
 /**
- * Corresponds to the function pointer passed to the pthread_create call. 
+ * Corresponds to the function pointer passed to the pthread_create call.
  * This function ensures that the proper book keeping is done when it has
  * completed its part of directory traversal.
- * 
- * Namely, before call pthread_exit, this function releases the appropriate 
+ *
+ * Namely, before call pthread_exit, this function releases the appropriate
  * thread slot (entry in the ThreadState::threadRefs table) and increments
  * ThreadState::availableThreadCount.
- * 
+ *
  */
 static void *runVisitThread(void *arg) {
   VisitContext *context = (VisitContext *)arg;
@@ -405,10 +405,10 @@ static void *runVisitThread(void *arg) {
 
 /**
  * This function attempts to perform the next visit in a new thread: if
- * all the thread slots are busy (i.e.: the number of active threads is 
+ * all the thread slots are busy (i.e.: the number of active threads is
  * currently at capacity), then the next visit is performed by the
  * calling thread.
- * 
+ *
  * Otherwise, the function starts a new thread, making sure the proper
  * bookkeeping is done (marking the corresponding slot has unavailable,
  * decrementing the available thread count).
