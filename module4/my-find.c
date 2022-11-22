@@ -441,9 +441,9 @@ void startVisitThread(VisitContext *context) {
     }
 
     // The following condition should never be true since
-    // since availableThreadCont > 0, then we should have
-    // slots available. Nevertheless, we're taking it into
-    // account, for robustness' sake.
+    // since if availableThreadCount > 0, then we should 
+    // haveslots available. Nevertheless, we're taking it 
+    // into account, for robustness' sake.
     if (slot == context->threadState->threadCapacity) {
       logIt(context->settings->systemLogLevel, VERBOSE,
             "Could not find available slot for thread expected to handle %s "
