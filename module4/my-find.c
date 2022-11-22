@@ -1,4 +1,39 @@
-
+/**
+ * A custom find-like command leveraging C's standard library.
+ *
+ * my-find -p -t 5 *.c /home/alice/dev/projects
+ * 
+ * Implementation Notes
+ * ====================
+ * 
+ * This program leverages the pthread API to perform directory traversal using
+ * multiple threads:
+ * 
+ * 1) The program allows specifying a number of threads (i.e.: dubbed thread 
+ *    capacity) to use (beyond the main thread) to perform the traversal. At
+ *    the outset, the program has <capacity> available threads to work with,
+ *    beyond the main thread.
+ * 
+ * 2) Execution starts with the main thread: it lists the files/directories 
+ *    under the provided path. If the -r option (standing for "recursive") 
+ *    has been specified by the user, the main thread attempts dispatching
+ *    the traversal of the next directory it encounters to a new thread. If
+ *    all threads are busy, then the main thread traverses the next directory.
+ * 
+ * 3) The process described in #2 continues recursively, and is identical for
+ *    the threads started by the main thread, and started by "descendant" 
+ *    threads of the main thread: when a directory is encountered, the current
+ *    thread attempts dispatching its traversal in a new thread. If all are 
+ *    busy at that moment, then it proceeds to the traversal itself.
+ * 
+ * 4) The processing of files (matching their names against the provided 
+ *    pattern) is done in the current thread (i.e.: only upon encountering
+ *    a directory is spawning a new thread attempted).
+ * 
+ * The above process requires the use of a recursive mutex to keep track of 
+ * the running threads. 
+ *
+ */
 #define _DEFAULT_SOURCE
 
 #include "dirent.h"
@@ -28,11 +63,14 @@ typedef uint8_t bool;
 
 #define LOG_LEVEL_NAME_LEN 50
 #define MAX_THREADS 255
-#define SLOT_MAIN_THREAD 99
+#define SLOT_MAIN_THREAD 255
 
 // ----------------------------------------------------------------------------
 // Utilities
 
+/**
+ *  Holds constants corresponding to the different log levels.
+ */
 typedef enum _LogLevel {
   TRACE = 0,
   VERBOSE = 1,
@@ -42,6 +80,10 @@ typedef enum _LogLevel {
 
 } LogLevel;
 
+/**
+ * Logging function: outputs  only if the current level is >= than the system's
+ * configured level.
+ */
 void logIt(LogLevel systemLevel, LogLevel currentLevel, char *format, ...) {
   if (currentLevel >= systemLevel) {
     va_list args;
@@ -56,6 +98,9 @@ void logIt(LogLevel systemLevel, LogLevel currentLevel, char *format, ...) {
   }
 }
 
+/**
+ * Assertion utility.
+ */
 void assertIt(bool condition, char *format, ...) {
   if (!condition) {
     va_list args;
@@ -65,12 +110,18 @@ void assertIt(bool condition, char *format, ...) {
   }
 }
 
+/**
+ * Wraps malloc() to check for allocation failure (asserts if that's the case).
+ */
 void *safemalloc(size_t size) {
   void *ptr = malloc(size);
   assertIt(ptr != NULL, "Could not allocate memory\n");
   return ptr;
 }
 
+/**
+ *  Wrap free() to check that the pointer to free isn't null.
+ */
 void safefree(void *ptr) {
   if (ptr != NULL) {
     free(ptr);
@@ -80,11 +131,34 @@ void safefree(void *ptr) {
 // ----------------------------------------------------------------------------
 // Threading
 
+/**
+ * Keeps track of a thread.
+ */
 typedef struct _ThreadRef {
+  /** 
+   * ID of the thread to which this field corresonds - should be deemded 
+   * invalid is the isAvailable flag is true.
+   */
   pthread_t thread;
+
+  /**
+   * Indicates whether or not the slot corresponding to the thread is available
+   * or not. If it isn't available, it means that the thread corresponding to 
+   * this instance is currently active, and that the slot isn't available. 
+   * Otherwise, it means that the thread has been exited (and the thread ID
+   * kept by the thread field is invalid).
+   */
   bool isAvailable;
 } ThreadRef;
 
+/**
+ * Program-wide structure (shared by all threads) holding the ThreadRef array
+ * used to keep track of running threads and available thread slots (a slot
+ * is simply a cell in the threadRefs array specified as a field of this struct).
+ * 
+ * Access to the threadRefs and availableThreadCount fields should be done in 
+ * a thread-safe manner, using the mutex that an instance of this struct provides.
+ */
 typedef struct _ThreadState {
   // Used to synchronize access to the members of this struct.
   pthread_mutex_t mutex;
@@ -92,18 +166,19 @@ typedef struct _ThreadState {
   ThreadRef threadRefs[MAX_THREADS];
   uint8_t threadCapacity;
   uint8_t availableThreadCount;
-  uint8_t busyThreadCount;
-
 } ThreadState;
 
+/**
+ * Initializes a ThreadState instance.
+ */
 void newThreadState(ThreadState *ts, uint8_t threadCapacity) {
 
   assertIt(threadCapacity <= MAX_THREADS,
            "Specified thread capacity (%u) must be <= MAX_THREADS (%u)\n",
            threadCapacity, MAX_THREADS);
   ts->threadCapacity = threadCapacity;
+  // Set to threadCapacity at the outset.
   ts->availableThreadCount = threadCapacity;
-  ts->busyThreadCount = 0;
 
   for (int slot = 0; slot < ts->threadCapacity; slot++) {
     ThreadRef *ref = &ts->threadRefs[slot];
@@ -117,6 +192,9 @@ void newThreadState(ThreadState *ts, uint8_t threadCapacity) {
            "Could not initialize mutex\n");
 }
 
+/**
+ * Releases the resources kept as part of the given ThreadState instance.
+ */ 
 void destroyThreadState(ThreadState *ts) {
   assertIt(pthread_mutexattr_destroy(&ts->mutex_attr) == 0,
            "Could not destroy mutex attributes\n");
@@ -126,15 +204,18 @@ void destroyThreadState(ThreadState *ts) {
 // ----------------------------------------------------------------------------
 // User input
 
-// Holds user-defined settings
-// (populated from command-line options)
+/** 
+ * Holds user-defined settings (populated from command-line options).
+ */
 typedef struct _Settings {
   char pattern[NAME_MAX];
   bool isRecursive;
   LogLevel systemLogLevel;
 } Settings;
 
-// initializes settings with defaults
+/** 
+ * Initializes settings with defaults.
+ */
 void newSettings(Settings *settings) {
   strcpy(settings->pattern, "");
   settings->isRecursive = FALSE;
@@ -144,7 +225,9 @@ void newSettings(Settings *settings) {
 // ----------------------------------------------------------------------------
 // File metadata
 
-// Holds directory/file info
+/**
+ * Holds directory/file metadata.
+ */
 typedef struct _FileInfo {
   // The full path to the file/directory to which this instance corresponds.
   char path[NAME_MAX];
@@ -156,11 +239,17 @@ typedef struct _FileInfo {
 // ----------------------------------------------------------------------------
 // File match callback
 
-// Defines the signature of the callback that is invoked when
-// a matching file is found.
+/**
+ * Defines the signature of the callback that is invoked when
+ * a matching file is found.
+ */
 typedef void (*FileMatchCallback)(const Settings *settings,
                                   const FileInfo *fileInfo);
 
+
+/**
+ * Implements the FileMatchCallback typedef.
+ */
 void outputMatch(const Settings *settings, const FileInfo *fileInfo) {
 
   int result = fnmatch(settings->pattern, fileInfo->name, FNM_PATHNAME);
@@ -175,9 +264,12 @@ void outputMatch(const Settings *settings, const FileInfo *fileInfo) {
 }
 
 // ----------------------------------------------------------------------------
-// VisitContext: encapsulates all parameters necessary for a visitDir function
-// call in the context of a specific thread.
+// VisitContext
 
+/** 
+ * Encapsulates all parameters necessary for a visitDir function call in the 
+ * context of a specific thread.
+ */
 typedef struct _VisitContext {
   Settings *settings;
   FileInfo dirInfo;
@@ -192,9 +284,15 @@ typedef struct _VisitContext {
 // ----------------------------------------------------------------------------
 // Directory traversal
 
-// Forward declaration of function prototype
+/**
+ * Forward declaration of function prototype.
+ */
 void startVisitThread(VisitContext *context);
 
+/**
+ * Visits the directory whose representation is encapsulated by the given 
+ * context. Calls startVisitThread whenever it encounters a sub-directory.
+ */
 uint8_t visitDir(VisitContext *context) {
   uint8_t exitCode = EXIT_SUCCESS;
   DIR *dir;
@@ -259,6 +357,16 @@ Finally:
   return exitCode;
 }
 
+/**
+ * Corresponds to the function pointer passed to the pthread_create call. 
+ * This function ensures that the proper book keeping is done when it has
+ * completed its part of directory traversal.
+ * 
+ * Namely, before call pthread_exit, this function releases the appropriate 
+ * thread slot (entry in the ThreadState::threadRefs table) and increments
+ * ThreadState::availableThreadCount.
+ * 
+ */
 static void *runVisitThread(void *arg) {
   VisitContext *context = (VisitContext *)arg;
   logIt(context->settings->systemLogLevel, VERBOSE,
@@ -273,7 +381,6 @@ static void *runVisitThread(void *arg) {
            "Error trying to lock thread state mutex (status: %d)\n",
            lockStatus);
   context->threadState->availableThreadCount += 1;
-  context->threadState->busyThreadCount -= 1;
   logIt(context->settings->systemLogLevel, VERBOSE,
         "Available thread count now at %u\n",
         context->threadState->availableThreadCount);
@@ -296,6 +403,16 @@ static void *runVisitThread(void *arg) {
   return NULL;
 }
 
+/**
+ * This function attempts to perform the next visit in a new thread: if
+ * all the thread slots are busy (i.e.: the number of active threads is 
+ * currently at capacity), then the next visit is performed by the
+ * calling thread.
+ * 
+ * Otherwise, the function starts a new thread, making sure the proper
+ * bookkeeping is done (marking the corresponding slot has unavailable,
+ * decrementing the available thread count).
+ */
 void startVisitThread(VisitContext *context) {
   assertIt(context != NULL, "startVisitThread:: VisitContext is NULL\n");
   logIt(context->settings->systemLogLevel, TRACE,
@@ -353,7 +470,6 @@ void startVisitThread(VisitContext *context) {
 
     threadContext->threadSlot = slot;
     threadContext->threadState->availableThreadCount -= 1;
-    threadContext->threadState->busyThreadCount += 1;
     int status = pthread_create(&threadRef->thread, NULL, runVisitThread,
                                 (void *)threadContext);
     assertIt(status == 0, "Error creating thread (status: %d)\n", status);
