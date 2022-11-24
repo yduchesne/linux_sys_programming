@@ -613,25 +613,45 @@ int main(int argc, char **argv) {
 
     logIt(settings.systemLogLevel, VERBOSE,
           "Waiting on active threads to complete...\n");
-    for (int slot = 0; slot < initialContext.threadState->threadCapacity;
-         slot++) {
-      logIt(settings.systemLogLevel, TRACE,
-            "Checking if thread for slot #%d is active and should be joined\n",
-            slot);
-      /*int lockStatus = pthread_mutex_lock(&initialContext.threadState->mutex);
-      assertIt(lockStatus == 0, "Could not lock mutex\n");*/
-      ThreadRef *threadRef = &(initialContext.threadState->threadRefs[slot]);
-      if (!threadRef->isAvailable) {
-        /*
-        int unlockStatus =
-            pthread_mutex_unlock(&initialContext.threadState->mutex);
 
-        assertIt(unlockStatus == 0, "Could not unlock mutex\n");
-        */
-        pthread_t thread = threadRef->thread;
-        logIt(settings.systemLogLevel, TRACE, "Joining thread for slot #%d\n",
+    // Checking that all threads have completed, avoiding
+    // exiting until that condition is verified. The following
+    // while loop is implemented to avoid the condition where
+    // the main thread omits joining a thread that has been created
+    // at around the same time as it hit that thread's corresponding 
+    // slot: given we're not using a mutex in the context of the
+    // following iteration, this could in theory possible.
+    //
+    // The strategy, therefore, is to keep on checking the state
+    // of each thread (in fact, each ThreadRef) until we could 
+    // count all threads as having completed.
+    uint8_t completedCount = 0;
+    while (TRUE)
+    {
+      for (int slot = 0; slot < initialContext.threadState->threadCapacity;
+          slot++) {
+        logIt(settings.systemLogLevel, TRACE,
+              "Checking if thread for slot #%d is active and should be joined\n",
               slot);
-        pthread_join(thread, NULL);
+        ThreadRef *threadRef = &(initialContext.threadState->threadRefs[slot]);
+        if (!threadRef->isAvailable) {
+          pthread_t thread = threadRef->thread;
+          logIt(settings.systemLogLevel, TRACE, "Joining thread for slot #%d\n",
+                slot);
+          pthread_join(thread, NULL);
+        }
+        else
+        {
+          completedCount++;
+        }
+      }
+      if (completedCount == initialContext.threadState->threadCapacity)
+      {
+        break;
+      }
+      else
+      {
+        completedCount = 0;
       }
     }
     logIt(settings.systemLogLevel, VERBOSE, "All active threads done\n");
